@@ -13,8 +13,6 @@ library(SIS)
 library(DT)
 library(stringr)
 library(parallel)
-library(CoxHD)
-library(mg14)
 ncore <- detectCores()
 ```
 # Data Preparation
@@ -24,7 +22,6 @@ Load data
 ```{r}
 dataFrame <- readRDS('dataFrame.rds')
 os  <- readRDS('os.rds')
-load('AMLSG_Clinical_Anon.RData')
 ```
 
 REMOVE NA
@@ -36,7 +33,7 @@ dataFrame <- as.data.frame(sapply(dataFrame, poorMansImpute))
 
 ```
 
-Cluster
+clusters
 
 ```{r}
 
@@ -47,7 +44,6 @@ hc1=hclust(d1,"ward.D")
 clusters <- cutree(hc1,k=3)
 table(clusters)
 dataFrame <- cbind(dataFrame,clusters)
-
 
 ```
 
@@ -68,213 +64,20 @@ datX.df <- subset(dataFrame,select = !grepl("^TPL",names(dataFrame)))
 
 ```
 
-Prepare Survival Data
-
-```{r}
-## From 1.3.3
-## os
-
-t <- clinicalData$Time_Diag_TPL
-t[is.na(t) | !clinicalData$TPL_Phase %in% "CR1" | !clinicalData$TPL_type %in% c("ALLO","FREMD") ] <- Inf ## Only allografts in CR1
-o <- clinicalData$OS
-tplIndexOs <-  t < o
-osTD <-  Surv(time = rep(0, nrow(clinicalData)), time2=pmin(o, t), event=ifelse(tplIndexOs, 0, clinicalData$Status) )
-osTD <- rbind(osTD, 
-        Surv(time=t[which(tplIndexOs)],
-                time2=o[which(tplIndexOs)], 
-                event=clinicalData$Status[which(tplIndexOs)])
-)
-osTD = Surv(osTD[,1],osTD[,2],osTD[,3])
-rm(o,t)
-tplSplitOs <- c(1:nrow(clinicalData), which(tplIndexOs))
-osYr <- os
-osYr[,1] <- osYr[,1]/365
-osYrTD <- osTD
-osYrTD[,1] <- osYrTD[,1]/365
-
-```
-
 # CoXHD::CPSS
 
+
+
 ## Read Group
-
-
 ```{r}
 dataList <- readRDS("dataList.rds")
 groups <- unlist(sapply(names(dataList), function(x) rep(x, ncol(dataList[[x]]))))
 groups[grepl("^(t_)|(inv)", colnames(dataFrame)) &! grepl(":", colnames(dataFrame))] <- "Fusions"
 groups[groups=="Cytogenetics"] <- "CNA"
-## groups <- c("Clinical",groups)
-## names(groups)[1] <- "clusters"
+groups <- c("Clinical",groups)
 groups <- factor(groups)
-## names(groups) <- c("clusters",colnames(dataFrame))
-names(groups) <- colnames(dataFrame)
+names(groups) <- c("clusters",colnames(dataFrame))
 table(groups)
-
-
-
-
-
-
-## 2.3.1
-dataFrameOsTD <- dataFrame[tplSplitOs,]
-dataFrameOsTD[which(tplIndexOs),grep("TPL", colnames(dataFrameOsTD), value=TRUE)] <- 0
-mainGroups <- grep("[A-Z][a-z]+[A-Z]",levels(groups), invert=TRUE, value=TRUE)
-mainGroups
-
-mainIdx <- groups %in% mainGroups
-osIdx <- !grepl("TPL", colnames(dataFrame)) ## Exclude TPL from OS analyses..
-whichRFXOs <- which((colSums(dataFrame)>=8 | mainIdx) & osIdx) # ie, > 0.5%
-mainIdxOs <- mainIdx & osIdx
-osTDIdx <- !grepl("TPL_efs", colnames(dataFrame))
-whichRFXOsTD <- which((colSums(dataFrame)>=8 | mainIdx) & osTDIdx) # ie, > 0.5%
-mainIdxOsTD <- mainIdx & osTDIdx
-whichRFXOsGG <- which((colSums(dataFrame)>=8 | mainIdxOs) & osIdx & groups %in% c(mainGroups,"GeneGene")) # ie, > 0.5%
-
-```
-
-Prepare for multistage model
-
-```{r}
-## 3.5.1
-library(msSurv)
-## Package dependency: graph
-## http://www.bioconductor.org/packages/release/bioc/html/graph.html
-
-
-d <- sapply(1:nrow(clinicalData), function(i){
-            i <<- i
-            t <- c(as.numeric(clinicalData[i,c("CR_date","Recurrence_date","Date_LF")]) - as.numeric(clinicalData$ERDate[i]))
-            o <- order(t, na.last=NA)
-            stages <- c(1:3,0)
-            r <- stages[c(1, o+1)]
-            if(clinicalData$Status[i])
-                r[length(r)] <- r[length(r)-1] +3
-            tt <- c(0,t[o])
-            if(length(o)==0)
-                return(c(rep(NA,7),i))
-            s <- cbind(id=i, stop=tt[-1], start.stage=r[-length(r)], end.stage=r[-1])[diff(tt)!=0,]
-            #s <- cbind(time1 = tt[-length(tt)], time2=tt[-1], death=c(rep(0, length(o)-1), clinicalData$Status[i]), outer(0:(length(o)-1), r[-3], `>=`)+0, i=i)[diff(tt)!=0,]
-            return(s)
-        })
-d <- as.data.frame(do.call("rbind",d))
-nodes <- as.character(1:6)
-edges <- list(`1`=list(edges=c("2","4")), `2`=list(edges=c("3","5")), `3`=list(edges="6"), `4`=list(edges=NULL), `5`=list(edges=NULL),`6`=list(edges=NULL))
-struct <-  new("graphNEL", nodes = nodes, edgeL = edges, edgemode = "directed")
-msurv <- msSurv(d, struct, bs = FALSE)
-
-## Include gene:gene interaction terms
-##
-whichRFXOsTDGG <- which((colSums(dataFrame)>=8 | mainIdxOsTD) & osTDIdx & groups %in% c(mainGroups,"GeneGene")) # ie, > 0.5%
-coxRFXFitOsTDGGc <- CoxRFX(dataFrameOsTD[,whichRFXOsTDGG], osTD, groups[whichRFXOsTDGG], which.mu=mainGroups) ## allow only the main groups to have mean different from zero.. 
-
-## Times fro allografts 3.5.2
-
-alloIdx <- clinicalData$TPL_type %in% c("ALLO","FREMD") # only allografts
-alloTimeCR1 <- clinicalData$Time_1CR_TPL + .5 # +.5 to make > 0
-alloTimeCR1[!alloIdx | (clinicalData$TPL_date < clinicalData$Recurrence_date & !clinicalData$TPL_Phase %in% c("CR1","RD"))] <- NA
-
-whichRFXRel <- whichRFXOsTDGG[grep("TPL",names(whichRFXOsTDGG), invert=TRUE)] #mainIdx & !grepl("TPL", names(dataFrame)) & groups!="Nuisance"
-t <- clinicalData$Recurrence_date
-t[is.na(t)] <- as.Date(1e6, origin="2000-01-01")
-relData <- MakeTimeDependent(dataFrame[whichRFXRel], timeEvent=alloTimeCR1, timeStop=as.numeric(pmin(t, clinicalData$Date_LF) - clinicalData$CR_date), status=!is.na(clinicalData$Recurrence_date)+0)
-relData$transplantCR1 <- relData$event
-relData$event <- NULL
-relData$transplantRel <- 0
-nrdData <- MakeTimeDependent(dataFrame[whichRFXRel], timeEvent=alloTimeCR1, timeStop=as.numeric(pmin(t, clinicalData$Date_LF) - clinicalData$CR_date), status=is.na(clinicalData$Recurrence_date) & clinicalData$Status)
-nrdData$transplantCR1 <- nrdData$event
-nrdData$event <- NULL
-nrdData$transplantRel <- 0
-alloTimeRel <- clinicalData$TPL_date - clinicalData$Recurrence_date + .5 # +.5 to make > 0
-alloTimeRel[!alloIdx | (clinicalData$TPL_date < clinicalData$Recurrence_date & !clinicalData$TPL_Phase %in% c("CR1","RD"))] <- NA
-i <- !is.na(clinicalData$Recurrence_date)
-prdData <- MakeTimeDependent(dataFrame[i,whichRFXRel], timeEvent=alloTimeRel[i], timeStop=as.numeric(clinicalData$Date_LF- clinicalData$Recurrence_date)[i], status=clinicalData$Status[i])
-prdData$transplantCR1 <- rep(0,nrow(prdData))
-w <- sub("\\.1","",rownames(relData))[relData$status==1 & relData$transplantCR1==1]
-prdData$transplantCR1[sub("\\.1","",rownames(prdData)) %in% w] <- 1
-prdData$transplantRel <- prdData$event
-prdData$event <- NULL
-w <- which(prdData$time1 == prdData$time2) ## 5 cases with LF=Rec
-prdData$time2[w] <- prdData$time2[w] + .5
-prdData$time0 <- as.numeric(clinicalData$Recurrence_date-clinicalData$CR_date)[prdData$index]
-
-```
-
-MultiStage Model Prediction Fn: 3.5.5
-
-```{r}
-library(Rcpp)
-
-MultiRFX5 <- function(coxRFXNcdTD, coxRFXCrTD, coxRFXNrdTD, coxRFXRelTD, coxRFXPrdTD, data, x =365, tdPrmBaseline = rep(1, ceiling(max(x))+1), tdOsBaseline = rep(1, ceiling(max(x))+1), ciType="analytical"){
-    cppFunction('NumericVector computeHierarchicalSurvival(NumericVector x, NumericVector diffS0, NumericVector S1Static, NumericVector haz1TimeDep) {
-                    int xLen = x.size();
-                    double h;
-                    NumericVector overallSurvival(xLen);
-                    for(int i = 0; i < xLen; ++i) overallSurvival[i] = 1;
-                    for(int j = 1; j < xLen; ++j){
-                    h = haz1TimeDep[j-1];
-                    for(int i = j; i < xLen; ++i){
-                    overallSurvival[i] += diffS0[j-1] * (1-pow(S1Static[i-j], h));
-                    }
-                    }
-                    return overallSurvival;
-                    }')
-    
-    
-    
-    ## Step 1: Compute KM survival curves and log hazard
-    getS <- function(coxRFX, data, max.x=5000) {        
-        if(!is.null(coxRFX$na.action)) coxRFX$Z <- coxRFX$Z[-coxRFX$na.action,]
-        data <- as.matrix(data[,match(colnames(coxRFX$Z),colnames(data)), drop=FALSE])
-        r <- PredictRiskMissing(coxRFX, data, var="var2")
-        H0 <- basehaz(coxRFX, centered = FALSE)
-        hazardDist <- splinefun(H0$time, H0$hazard, method="monoH.FC")
-        x <- c(0:ceiling(max.x))
-        S <- exp(-hazardDist(x))
-        return(list(S=S, r=r, x=x, hazardDist=hazardDist, r0 = coxRFX$means %*% coef(coxRFX)))
-    }
-    kmCr <- getS(coxRFX = coxRFXCrTD, data = data, max.x=max(x))
-    kmEs <- getS(coxRFX = coxRFXNcdTD, data = data, max.x=max(x))
-    kmCir <- getS(coxRFX = coxRFXRelTD, data = data, max.x=max(x))
-    kmNrm <- getS(coxRFX = coxRFXNrdTD, data = data, max.x=max(x))
-    kmPrs <- getS(coxRFX = coxRFXPrdTD, data = data, max.x=max(x))
-    
-    xx <- 0:ceiling(max(x))
-    
-    sapply(1:nrow(data), function(i){
-                ## Step 2: Adjust curves for competing risks, accounting for hazard
-                crAbs <-  cumsum(c(1,diff(kmCr$S^exp(kmCr$r[i,1]))) * kmEs$S ^ exp(kmEs$r[i,1]))
-                esAbs  <- cumsum(c(1,diff(kmEs$S^exp(kmEs$r[i,1]))) * kmCr$S ^ exp(kmCr$r[i,1])) ## array times x nrow(data)
-                cirCrAbs <- cumsum(c(1,diff(kmCir$S^exp(kmCir$r[i,1]))) * kmNrm$S ^ exp(kmNrm$r[i,1]))
-                nrsCrAbs <- cumsum(c(1,diff(kmNrm$S^exp(kmNrm$r[i,1]))) * kmCir$S ^ exp(kmCir$r[i,1])) ## array times x nrow(data)
-                
-                ## Step 3: Compute hierarchical survival
-                ### Prs         
-                rsCrAbs <- computeHierarchicalSurvival(x = xx, diffS0 = diff(cirCrAbs), S1Static = kmPrs$S, haz1TimeDep = tdPrmBaseline * exp(kmPrs$r[i,1]))
-                
-                ## Confidence intervals (loglog)
-                PlogP2 <- function(x) {(x * log(x))^2}
-                errOs <- kmNrm$r[i,2] * PlogP2(kmNrm$S^exp(kmNrm$r[i,1])) * (1-(1-kmCir$S ^ exp(kmCir$r[i,1]))) * (1-kmPrs$S ^ exp(kmPrs$r[i,1]))^2 + kmCir$r[i,2] * PlogP2(kmCir$S ^ exp(kmCir$r[i,1])) * (1-kmPrs$S ^ exp(kmPrs$r[i,1]))^2 * (kmNrm$S ^ exp(kmNrm$r[i,1]))^2 +  kmPrs$r[i,2] * PlogP2(kmPrs$S ^ exp(kmPrs$r[i,1])) * (1-kmCir$S ^ exp(kmCir$r[i,1]))^2 * (kmNrm$S ^ exp(kmNrm$r[i,1]))^2 
-                sdOsCr <- sqrt(errOs / PlogP2(1-(1-nrsCrAbs)-(1-rsCrAbs)))
-                
-                
-                ### Overall survival from enrollment
-                nrsEr <- computeHierarchicalSurvival(x = xx, diffS0 = diff(crAbs), S1Static = nrsCrAbs, haz1TimeDep = tdOsBaseline)
-                rsEr <- computeHierarchicalSurvival(x = xx, diffS0 = diff(crAbs), S1Static = rsCrAbs, haz1TimeDep = tdOsBaseline)
-                cirEr <- computeHierarchicalSurvival(x = xx, diffS0 = diff(crAbs), S1Static = cirCrAbs, haz1TimeDep = tdOsBaseline)
-                cbind(deathInErFromEr=1-esAbs, deathInCrFromEr=1-nrsEr, deathInRelFromEr=1-rsEr, aliveInRelFromEr=1-cirEr-(1-rsEr), aliveInCrFromEr=1-crAbs - (1-cirEr) - (1-nrsEr),
-                        deathInCrFromCr = 1-nrsCrAbs, deathInRelapseFromCr=(1-rsCrAbs), aliveInRelapseFromCr = (1-cirCrAbs) - (1-rsCrAbs), osInCrFromCrSd=sdOsCr
-                )
-            }, simplify='array')
-}
-
-```
-
-
-
-
-
-```{r}
 
 
 ```
@@ -282,8 +85,7 @@ MultiRFX5 <- function(coxRFXNcdTD, coxRFXCrTD, coxRFXNrdTD, coxRFXRelTD, coxRFXP
 # Repeated Splitting
 
 ```{r,eval=F}
-## datX <- subset(dataFrame,select=grepl("^TPL",names(dataFrame))
-## datOS <- osTD
+
 ## Repeat 10 times
 b <- 10
 prderCPSS <- prderSIS <- matrix(0,nrow=b,ncol=1)
@@ -293,23 +95,19 @@ for ( i in 1:b)
 {
     
     ## Split into training testing dataset 30% training and 30% testing
-    ## Data for multistage modelling
-    idx <- sample(c(1:nrow(dataFrameOsTD)),size=0.8*nrow(dataFrameOsTD))
-    traindOSTD <- dataFrameOsTD[idx,]
+    idx <- sample(c(1:1540),size=1078)
+    trainX <- datX[idx,]
+    trainX.df <- datX.df[idx,]
+    os.train <- os[idx,]
 
-    testOSTD <- dataFrameOsTD[-idx,]
+    testX <- datX[-idx,]
+    testX.df <- datX.df[-idx,]
+    os.test <- os[-idx,]
 
-    ## Data for CPSS
-    idx2 <- sample(c(1:nrow(dataFrame)), size=0.8*nrow(dataFrame))
-    trainX <- datX[idx2,]
-    os.train <- os[idx2,]
-    testX <- datX[-idx2,]
-    os.test <- os[-idx2,]
-    
     require(CoxHD)
     require(mg14)
     scope <-  c("Genetics","CNA","Treatment","Fusions")
-    CPSSfit <- CoxCPSSInteractions(X=as.matrix(trainX),surv=os.train,scope=which(groups %in% scope),mc.cores=ncore)
+    CPSSfit <- CoxCPSSInteractions(X=trainX.df,surv=os.train,scope=which(groups %in% scope),mc.cores=ncore)
     CPSSresult <- names(CPSSfit$coxph$coefficients)
 
     ## Model Performance
@@ -319,7 +117,7 @@ for ( i in 1:b)
     require(survAUC)
     ## SIS formula
 
-    sisfit <- SIS(x=as.matrix(trainX),y=os.train,family='cox',penalty='lasso',tune='bic',iter=FALSE)
+    sisfit <- SIS(x=trainX,y=os.train,family='cox',penalty='lasso',tune='bic',iter=FALSE)
     SISresult <- names(trainX.df)[sisfit$ix]
 
 
@@ -333,7 +131,8 @@ for ( i in 1:b)
     ## SIS
     times <- seq(10,1825,1) ## times according to author
 
-    tr.fit.sis <- coxph(SISForm, data=trainX.df,x=T,y=T)
+    ## tr.fit.sis <- coxph(SISForm, data=trainX.df,x=T,y=T)
+    tr.fit.sis <- CoxRFX(Z=as.matrix(trainX.df[,colnames(trainX.df)%in%SISresult]),surv=os.train)
     lp.sis <- predict(tr.fit.sis)
     lpnew.sis <- predict(tr.fit.sis, newdata=testX.df)
     surv.rsp.sis <- os.train
@@ -343,7 +142,8 @@ for ( i in 1:b)
     AUC.sis <- AUC.uno(surv.rsp.sis,surv.rsp.new.sis, scale(lpnew.sis),times)$auc
 
     ## CPSS
-    tr.fit.cpss <- coxph(CPSSForm, data=trainX.df,x=T,y=T)
+    ## tr.fit.cpss <- coxph(CPSSForm, data=trainX.df,x=T,y=T)
+    tr.fit.cpss <- CoxRFX(Z=as.matrix(trainX.df[,colnames(trainX.df)%in%CPSSresult]),surv=os.train)
     lp.cpss <- predict(tr.fit.cpss)
     lpnew.cpss <- predict(tr.fit.cpss, newdata=testX.df)
     surv.rsp.cpss <- os.train
