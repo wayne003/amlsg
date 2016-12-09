@@ -272,7 +272,8 @@ MultiRFX5 <- function(coxRFXNcdTD, coxRFXCrTD, coxRFXNrdTD, coxRFXRelTD, coxRFXP
 # Repeated Splitting
 
 ```{r,eval=F}
-datX <- subset(dataFrameOsTD,select=grepl("^TPL",names(dataFrameOsTD)))
+## datX <- subset(dataFrame,select=grepl("^TPL",names(dataFrame))
+## datOS <- osTD
 ## Repeat 10 times
 b <- 10
 prderCPSS <- prderSIS <- matrix(0,nrow=b,ncol=1)
@@ -282,16 +283,23 @@ for ( i in 1:b)
 {
     
     ## Split into training testing dataset 30% training and 30% testing
+    ## Data for multistage modelling
     idx <- sample(c(1:nrow(dataFrameOsTD),size=0.8*nrow(dataFrameOsTD)))
-    traindat <- dataFrameOsTD[idx,]
-    trainX <- 
-    testdat <- dataFrameOsTD[-idx,]
+    traindOSTD <- dataFrameOsTD[idx,]
 
+    testOSTD <- dataFrameOsTD[-idx,]
 
+    ## Data for CPSS
+    idx2 <- sample(c(1:nrow(dataFrame), size=0.8*nrow(dataFrame)))
+    trainX <- datX[idx2,]
+    os.train <- os[idx2,]
+    testX <- datX[-idx2,]
+    os.test <- os[-idx2,]
+    
     require(CoxHD)
     require(mg14)
     scope <-  c("Genetics","CNA","Treatment","Fusions")
-    CPSSfit <- CoxCPSSInteractions(X=trainX.df,surv=os.train,scope=which(groups %in% scope),mc.cores=ncore)
+    CPSSfit <- CoxCPSSInteractions(X=trainX,surv=os.train,scope=which(groups %in% scope),mc.cores=ncore)
     CPSSresult <- names(CPSSfit$coxph$coefficients)
 
     ## Model Performance
