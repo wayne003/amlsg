@@ -48,6 +48,7 @@ clusters <- cutree(hc1,k=3)
 table(clusters)
 dataFrame <- cbind(dataFrame,clusters)
 
+
 ```
 
 
@@ -103,9 +104,17 @@ dataList <- readRDS("dataList.rds")
 groups <- unlist(sapply(names(dataList), function(x) rep(x, ncol(dataList[[x]]))))
 groups[grepl("^(t_)|(inv)", colnames(dataFrame)) &! grepl(":", colnames(dataFrame))] <- "Fusions"
 groups[groups=="Cytogenetics"] <- "CNA"
+## groups <- c("Clinical",groups)
+## names(groups)[1] <- "clusters"
 groups <- factor(groups)
+## names(groups) <- c("clusters",colnames(dataFrame))
 names(groups) <- colnames(dataFrame)
 table(groups)
+
+
+
+
+
 
 ## 2.3.1
 dataFrameOsTD <- dataFrame[tplSplitOs,]
@@ -268,6 +277,7 @@ MultiRFX5 <- function(coxRFXNcdTD, coxRFXCrTD, coxRFXNrdTD, coxRFXRelTD, coxRFXP
 ```{r}
 
 
+```
 
 # Repeated Splitting
 
@@ -284,13 +294,13 @@ for ( i in 1:b)
     
     ## Split into training testing dataset 30% training and 30% testing
     ## Data for multistage modelling
-    idx <- sample(c(1:nrow(dataFrameOsTD),size=0.8*nrow(dataFrameOsTD)))
+    idx <- sample(c(1:nrow(dataFrameOsTD)),size=0.8*nrow(dataFrameOsTD))
     traindOSTD <- dataFrameOsTD[idx,]
 
     testOSTD <- dataFrameOsTD[-idx,]
 
     ## Data for CPSS
-    idx2 <- sample(c(1:nrow(dataFrame), size=0.8*nrow(dataFrame)))
+    idx2 <- sample(c(1:nrow(dataFrame)), size=0.8*nrow(dataFrame))
     trainX <- datX[idx2,]
     os.train <- os[idx2,]
     testX <- datX[-idx2,]
@@ -299,7 +309,7 @@ for ( i in 1:b)
     require(CoxHD)
     require(mg14)
     scope <-  c("Genetics","CNA","Treatment","Fusions")
-    CPSSfit <- CoxCPSSInteractions(X=trainX,surv=os.train,scope=which(groups %in% scope),mc.cores=ncore)
+    CPSSfit <- CoxCPSSInteractions(X=as.matrix(trainX),surv=os.train,scope=which(groups %in% scope),mc.cores=ncore)
     CPSSresult <- names(CPSSfit$coxph$coefficients)
 
     ## Model Performance
@@ -309,7 +319,7 @@ for ( i in 1:b)
     require(survAUC)
     ## SIS formula
 
-    sisfit <- SIS(x=trainX,y=os.train,family='cox',penalty='lasso',tune='bic',iter=FALSE)
+    sisfit <- SIS(x=as.matrix(trainX),y=os.train,family='cox',penalty='lasso',tune='bic',iter=FALSE)
     SISresult <- names(trainX.df)[sisfit$ix]
 
 
