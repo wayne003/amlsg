@@ -1,0 +1,150 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+---
+
+```{r}
+knitr::opts_chunk$set(cache = T)
+library(SIS)
+library(DT)
+library(stringr)
+```
+# Data Preparation
+
+Load data
+
+```{r}
+dataFrame <- readRDS('dataFrame.rds')
+os  <- readRDS('os.rds')
+```
+
+REMOVE NA
+
+```{r}
+
+poorMansImpute <- function(x) {x[is.na(x)] <- mean(x, na.rm=TRUE); return(x)}
+dataFrame <- as.data.frame(sapply(dataFrame, poorMansImpute))
+
+```
+
+
+Strip out OS and form X
+
+```{r}
+dim(dataFrame)
+str(dataFrame$TPL_os)
+str_subset(names(dataFrame),"^TPL")
+
+
+datX<- as.matrix(subset(dataFrame,select = !grepl("^TPL",names(dataFrame))))
+datX.df <- subset(dataFrame,select = !grepl("^TPL",names(dataFrame)))
+## str_subset(names(trainX),"^TPL")
+
+
+
+```
+
+# SIS
+
+```{r}
+sisfit <- SIS(x=trainX,y=os.train,family='cox',penalty='lasso',tune='aic',iter=FALSE)
+```
+
+## Result
+
+```{r}
+SISresult <- names(trainX.df)[sisfit$ix]
+SISresult
+```
+
+# CoXHD::CPSS
+
+## Read Group
+```{r}
+dataList <- readRDS("dataList.rds")
+groups <- unlist(sapply(names(dataList), function(x) rep(x, ncol(dataList[[x]]))))
+groups[grepl("^(t_)|(inv)", colnames(dataFrame)) &! grepl(":", colnames(dataFrame))] <- "Fusions"
+groups[groups=="Cytogenetics"] <- "CNA"
+groups <- factor(groups)
+names(groups) <- colnames(dataFrame)
+table(groups)
+
+
+```
+
+# Repeated Splitting
+
+```{r}
+
+## Repeat 10 times
+b <- 10
+prderCPSS <- prderSIS <- matrix(0,nrow=b,ncol=1)
+for ( i in 1:b)
+{
+    
+    ## Split into training testing dataset 30% training and 30% testing
+    idx <- sample(c(1:1540),size=1078)
+    trainX <- datX[idx,]
+    trainX.df <- datX.df[idx,]
+    os.train <- os[idx,]
+
+    testX <- datX[-idx,]
+    testX.df <- datX.df[-idx,]
+    os.test <- os[-idx,]
+
+    require(CoxHD)
+    require(mg14)
+    scope <-  c("Genetics","CNA","Treatment","Fusions")
+    CPSSfit <- CoxCPSSInteractions(X=trainX.df,surv=os.train,scope=which(groups %in% scope),mc.cores=3)
+    CPSSresult <- names(CPSSfit$coxph$coefficients)
+
+    ## Model Performance
+
+### AUC
+
+    require(survAUC)
+    ## SIS formula
+
+    SISVar <- paste(SISresult,collapse='+')
+    SISForm <- as.formula(paste("os.train ~",SISVar))
+
+    ## CPSS formula
+    CPSSVar <- str_split(CPSSfit$coxph$formula,"~")[[3]]
+    CPSSForm <- as.formula(paste("os.train ~",CPSSVar))
+
+    ## SIS
+    times <- seq(10,1825,1) ## times according to author
+
+    tr.fit.sis <- coxph(SISForm, data=trainX.df,x=T,y=T)
+    lp.sis <- predict(tr.fit.sis)
+    lpnew.sis <- predict(tr.fit.sis, newdata=testX.df)
+    surv.rsp.sis <- os.train
+    surv.rsp.new.sis <- os.test
+
+
+    AUC.sis <- AUC.uno(surv.rsp.sis,surv.rsp.new.sis, scale(lpnew.sis),times)$auc
+
+    ## CPSS
+    tr.fit.cpss <- coxph(CPSSForm, data=trainX.df,x=T,y=T)
+    lp.cpss <- predict(tr.fit.cpss)
+    lpnew.cpss <- predict(tr.fit.cpss, newdata=testX.df)
+    surv.rsp.cpss <- os.train
+    surv.rsp.new.cpss <- os.test
+
+
+    AUC.cpss <- AUC.uno(surv.rsp.cpss,surv.rsp.new.cpss, scale(lpnew.cpss),times)$auc
+
+    ##plot(x=times,y=AUC.cpss,type='l',xlab="Days",ylab="AUC",ylim=c(0.4,0.7))
+    ##lines(x=times,y=AUC.sis,col=2)
+    ##legend("bottomright",c("CPSS","SIS"),lty=1,col=c(1,2))
+
+    prderCPSS[i] <- predErr(surv.rsp.cpss,surv.rsp.new.cpss,lp=lp.cpss, lpnew=lpnew.cpss,times=times)$ierror
+    prderSIS[i] <- predErr(surv.rsp.sis,surv.rsp.new.sis,lp=lp.sis, lpnew=lpnew.sis,times=times)$ierror
+}
+
+
+```
